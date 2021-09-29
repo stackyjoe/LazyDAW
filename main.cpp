@@ -67,7 +67,7 @@ int main() {
         return errors;
     });
 
-    second_node.set(2,1,[](auto const &input, auto &output){
+    second_node.set(2,1, [](auto const &input, auto &output){
                 std::vector<error> errors;
 
                 using namespace LazyDAW;
