@@ -1,125 +1,125 @@
 #include "lazydaw.hpp"
 #include "computationgraph.hpp"
 
-
 #include <cassert>
+#include <cstring>
+#include <cstddef>
+#include <algorithm>
 #include <iostream>
+#include <fstream>
+#include <numeric>
 
 int main() {
     using namespace LazyDAW;
     using namespace std::string_literals;
 
     ComputationGraph<AudioRepresentation> g;
-
-    AudioSample a;
-
-    a.audio.reserve(16);
-
-    for(auto i = 0; i < 16; ++i)
-        a.audio.push_back(i);
     
     g.add_interior_node();
     g.add_interior_node();
+    g.add_interior_node();
 
-    auto & first_node = g.peek_inner(0);
-    auto & second_node = g.peek_inner(1);
+    g.peek_inner(0).set(1,1, [](auto const &input, auto &output) -> std::vector<error> {
+        auto const & optional_input = *input[0].maybe_value;
 
-    first_node.set(1,2,[](auto const &input, auto &output) -> std::vector<error> {
-        std::vector<error> errors;
+        if(optional_input.has_value())
+            output[0].value = AudioRepresentation(std::move(NaiveDiscreteFourierTransform(*optional_input.template get<AudioSample>())));
+        return {};
+    });
+    g.peek_inner(1).set(1,1, [](auto const &input, auto &output) -> std::vector<error> {
+        constexpr auto cutoff_freq = 10000.;
 
-        // Given the previous assert we actually know the size here, but I wrote up a
-        //     'fully general' example to see what one actually has to do to set up a 
-        //     node with the current API. Clearly it must be made simpler for the user.
-        for(auto i = 0; i < output.size(); ++i) {
-            auto input_payload = input[0].maybe_value->data.value();
+        size_t i = 0;
 
-            auto visitor = [&errors, i](auto&& arg) mutable -> AudioRepresentation {
+        auto const * input_samples = input[0].maybe_value->template get<FourierCoefficients>();
 
-                using namespace LazyDAW;
-                using T = std::decay_t<decltype(arg)>;
-                if constexpr (std::is_same_v<T, AudioSample>) {
+        output[0].value = FourierCoefficients();
 
-                    auto input_amplitudes = arg.audio;
+        auto  * output_samples = output[0].value.template get<FourierCoefficients>();
 
-                    AudioSample output_amplitudes;
-                    output_amplitudes.audio.reserve(input_amplitudes.size());
-                
-                    for(auto amplitude : input_amplitudes) {
-                        output_amplitudes.audio.push_back((i+2)*amplitude);
-                    }
+        output_samples->zero_out(input_samples->size());
 
-                    return {output_amplitudes};
-                }
-                else if constexpr (std::is_same_v<T, FourierCoefficients>) {
-                    errors.push_back("Memory got mashed but it didn't cause a Segmentation Fault."s);
-                    return {std::nullopt};
-                }
-                else 
-                    errors.push_back("Bad visitor access."s);
-                    return {std::nullopt};
-            }; // end of capturing lambda named visitor
-            
-            auto output_payload = std::visit(visitor, input_payload);
-
-            output[i].value = std::move(output_payload);
+        while(i < std::min(cutoff_freq, static_cast<double>(input_samples->size()))) {
+            output_samples->data()[i] = 0;
+            ++i;
         }
 
-        return errors;
+        while(i < std::min(input_samples->size(), output_samples->size())) {
+            output_samples->data()[i] = static_cast<int16_t>((*(input_samples->data() +i)).real());
+            ++i;
+        }
+        
+        return {};
+    });
+    g.peek_inner(2).set(1,1,[](auto const &input, auto & output) -> std::vector<error> {
+        auto const & optional_payload = *input[0].maybe_value;
+
+        if(optional_payload.has_value())
+            output[0].value = AudioRepresentation(std::move(NaiveDiscreteInverseFourierTransform(*optional_payload.template get<FourierCoefficients>())));
+        else
+            throw std::runtime_error("No value");
+        return {};
     });
 
-    second_node.set(2,1, [](auto const &input, auto &output){
-                std::vector<error> errors;
+    g.link_node({&(g.peek_source()), 0}, {&g.peek_inner(0), 0});
+    g.link_node({&g.peek_inner(0), 0},{&g.peek_inner(1), 0});
+    g.link_node({&g.peek_inner(1), 0},{&g.peek_inner(2), 0});
+    g.link_node({&g.peek_inner(2), 0}, {&(g.peek_sink()), 0});
 
-                using namespace LazyDAW;
+    std::ifstream input("input.wav", std::ios::binary | std::ios::in);
 
-                assert(input[0].maybe_value->template get<AudioSample>()->audio.size() == input[1].maybe_value->template get<AudioSample>()->audio.size());
+    std::vector<std::byte> raw_input(44,std::byte(0));
 
-                size_t length = input[0].maybe_value->template get<AudioSample>()->audio.size();
+    input.read(reinterpret_cast<char*>(raw_input.data()),44);
 
-                AudioSample output_amplitudes;
-                output_amplitudes.audio.reserve(length);
+    std::vector<std::byte> raw_size = {std::byte(0), std::byte(0), std::byte(0), std::byte(0)};
 
-                for(auto j = 0; j < length; ++j)
-                    output_amplitudes.audio.push_back(0);
-                
-                for(auto i = 0; i < input.size(); ++i) {
-                    auto input_payload = input[i].maybe_value->template get<AudioSample>();
+    size_t i = 0;
+    for(; i < 4; ++i) {
+            raw_size[i]=raw_input.data()[i+4];
+    }
+
+    int32_t * truncated_size = reinterpret_cast<int32_t *>(raw_size.data());
+
+    std::cout << "Expect wav size of " << *truncated_size << std::endl;
+
+    raw_input.resize(std::max(*truncated_size,45));
+    input.read(reinterpret_cast<char *>(&raw_input[44]),std::max(45, ((*truncated_size)-44)));
     
-                    auto const & input_amplitudes = input_payload->audio;
-                
-                    for(auto j = 0; j < length; ++j) {
-                        output_amplitudes.audio[j]+=input_amplitudes[j];
-                    }
+    AudioRepresentation p;
+    AudioSample wav;
 
-                }
-                output[0].value = {std::move(output_amplitudes)};
+    wav.zero_out(*truncated_size-44);
 
-                return errors;
-    });
+    std::memcpy(&*wav.begin(),
+                &raw_input[44],
+               *truncated_size-44);
 
+    input.close();
 
-    g.link_node({&(g.peek_source()), 0}, {&first_node, 0});
-    g.link_node({&first_node, 0},{&second_node, 0});
-    g.link_node({&first_node, 1},{&second_node, 1});
-    g.link_node({&second_node, 0}, {&(g.peek_sink()), 0});
+    p = { std::move(wav) };
 
-    AudioRepresentation p = {a};
+    std::cout << p.template get<AudioSample>()->size() << std::endl;
 
-    auto output = g.compute(p);
+    auto raw_output = g.compute(std::move(p));
 
-    auto errors = output.errors;
+    auto const &errors = raw_output.errors;
 
+    if(!errors.empty()) {
     for(auto err : errors)
         std::cout << err.message << "\n";
-
-    auto real_output = output.result.get<AudioSample>()->audio;
-
-    for(auto amplitude : real_output) {
-        std::cout << amplitude << " ";
+        return EXIT_FAILURE;
     }
-    
-    std::cout << std::endl;
 
+    auto & real_output = raw_output.result.template get<AudioSample>()->discrete_amplitudes;
+
+    std::ofstream output("output.wav", std::ios::binary | std::ios::out);
+
+    output.write(reinterpret_cast<char const *>(&raw_input[0]),44);
+
+    output.write(reinterpret_cast<char*>(real_output.data()), real_output.size());
+
+    std::cout << "Success." << std::endl;
 
     return EXIT_SUCCESS;
 }
